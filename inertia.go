@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/lemmego/api/app"
-	"github.com/romsar/gonertia"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path"
 	"strings"
+
+	"github.com/lemmego/api/app"
+	"github.com/romsar/gonertia"
 )
 
 const ViteHotPath = "./public/hot"
@@ -193,5 +194,6 @@ func Vite(manifestPath, buildDir string) func(path string) (string, error) {
 }
 
 func Get(a app.App) *Inertia {
-	return a.Service(&Inertia{}).(*Inertia)
+	return app.Get[*Inertia](a)
+	// return a.Service(&Inertia{}).(*Inertia)
 }
