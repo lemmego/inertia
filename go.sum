@@ -171,8 +171,7 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
-github.com/romsar/gonertia v1.3.0 h1:XyDwmiGBGV7nntuJbs7KQZCHM4wHFCLZdXolyduW05I=
-github.com/romsar/gonertia v1.3.0/go.mod h1:4B9dtHbxdbUDZimnGmaIojrC37RYjTMOuTZpeo4jZ0E=
+github.com/romsar/gonertia v1.3.5 h1:RGMitib42oNWE9P79SQNhUK1afbBeS9TrkBkWtxkpjE=
 github.com/romsar/gonertia/v3 v3.0.0 h1:Prnfflq14Axz4Csjn+h9WVlinSGGoJSbyiXinNMcuAg=
 github.com/romsar/gonertia/v3 v3.0.0/go.mod h1:QrEjAsqiHXxWSEtILCf3SQJ5UwPkcXYKbuPLxb0T6kY=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
