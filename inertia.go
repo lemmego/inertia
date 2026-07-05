@@ -204,6 +204,7 @@ func (p *Provider) Provide(a app.App) error {
 
 	inertia := NewInertia(a, root, opts...)
 	a.AddService(inertia)
+	a.Router().Use(inertia.Middleware)
 	return nil
 }
 
