@@ -585,12 +585,20 @@ func (i *Inertia) Respond(c app.Context, filePath string, props map[string]any) 
 
 // Redirect performs a server-side redirect.
 func (i *Inertia) Redirect(c app.Context, url string) {
-	i.inner.Redirect(c.ResponseWriter(), c.Request(), url)
+	if c.Request().Method == "PUT" || c.Request().Method == "PATCH" || c.Request().Method == "DELETE" {
+		i.inner.Redirect(c.ResponseWriter(), c.Request(), url, http.StatusSeeOther)
+	} else {
+		i.inner.Redirect(c.ResponseWriter(), c.Request(), url)
+	}
 }
 
 // Back redirects the user to the previous URL.
 func (i *Inertia) Back(c app.Context) {
-	i.inner.Back(c.ResponseWriter(), c.Request(), c.Status())
+	if c.Request().Method == "PUT" || c.Request().Method == "PATCH" || c.Request().Method == "DELETE" {
+		i.inner.Back(c.ResponseWriter(), c.Request(), http.StatusSeeOther)
+	} else {
+		i.inner.Back(c.ResponseWriter(), c.Request())
+	}
 }
 
 // Location performs an external redirect. For Inertia requests it sends a 409
