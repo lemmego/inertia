@@ -56,6 +56,7 @@ type Config struct {
 	VersionFromFile string
 	VersionFS       any  // io/fs.FS
 	VersionFSPath   string
+	SSREnabled      bool
 	SSRURL          string
 	SSRHTTPClient   any  // *http.Client
 	FlashProvider   FlashProvider
@@ -91,13 +92,18 @@ func (v withVersionFromFile) Apply(c *Config) { c.VersionFromFile = string(v) }
 // WithVersionFromFile sets the asset version from a file's checksum.
 func WithVersionFromFile(path string) Option { return withVersionFromFile(path) }
 
+type withSSREnabled struct{}
+
+func (s withSSREnabled) Apply(c *Config) { c.SSREnabled = true }
+
+// WithSSR enables server-side rendering with auto-detection.
+// In development mode, the Vite dev server URL is auto-detected from the
+// hot file. In production, defaults to http://127.0.0.1:13714.
+func WithSSR() Option { return withSSREnabled{} }
+
 type withSSR struct{ url string }
 
-func (s withSSR) Apply(c *Config) { c.SSRURL = s.url }
-
-// WithSSR enables server-side rendering at the default URL
-// (http://127.0.0.1:13714).
-func WithSSR() Option { return withSSR{url: "http://127.0.0.1:13714"} }
+func (s withSSR) Apply(c *Config) { c.SSREnabled = true; c.SSRURL = s.url }
 
 // WithSSRAt enables server-side rendering at a custom URL.
 func WithSSRAt(url string) Option { return withSSR{url: url} }
@@ -400,6 +406,10 @@ func NewInertia(a app.App, rootTemplatePath string, opts ...Option) *Inertia {
 	// Translate Config → gonertia.Option
 	var gOpts []gonertia.Option
 
+	if cfg.SSREnabled && cfg.SSRURL == "" {
+		cfg.SSRURL = detectSSRURL()
+	}
+
 	if cfg.Version != "" {
 		gOpts = append(gOpts, gonertia.WithVersion(cfg.Version))
 	}
@@ -544,6 +554,21 @@ func readViteHotURL(hotPath string) string {
 		return url
 	}
 	return ""
+}
+
+// detectSSRURL auto-detects the appropriate SSR URL for the current environment.
+// In development (when Vite hot file exists), it returns the Vite dev server URL
+// with the Inertia SSR path. In production, it returns the default standalone SSR
+// server URL.
+func detectSSRURL() string {
+	hotContent, err := os.ReadFile(ViteHotPath)
+	if err == nil {
+		viteURL := strings.TrimSpace(string(hotContent))
+		if strings.HasPrefix(viteURL, "http://") || strings.HasPrefix(viteURL, "https://") {
+			return viteURL + "/__inertia_ssr"
+		}
+	}
+	return "http://127.0.0.1:13714"
 }
 
 // probeVitePort probes TCP ports starting from startPort to find a listening
