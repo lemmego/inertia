@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -54,11 +53,11 @@ type FlashProvider interface {
 type Config struct {
 	Version         string
 	VersionFromFile string
-	VersionFS       any  // io/fs.FS
+	VersionFS       any // io/fs.FS
 	VersionFSPath   string
 	SSREnabled      bool
 	SSRURL          string
-	SSRHTTPClient   any  // *http.Client
+	SSRHTTPClient   any // *http.Client
 	FlashProvider   FlashProvider
 	ContainerID     string
 	EncryptHistory  bool
@@ -208,7 +207,10 @@ func (p *Provider) Provide(a app.App) error {
 	)
 	opts = append(opts, p.Options...)
 
-	inertia := NewInertia(a, root, opts...)
+	inertia, err := NewInertiaWithError(a, root, opts...)
+	if err != nil {
+		return err
+	}
 	a.AddService(inertia)
 	a.Router().Use(inertia.Middleware)
 	return nil
@@ -393,9 +395,19 @@ type InertiaResponse struct {
 // Constructor — the translation layer
 // ---------------------------------------------------------------------------
 
-// NewInertia creates a new Inertia instance. User-supplied Options are
-// collected into a Config, then translated into gonertia options internally.
+// NewInertia creates a new Inertia instance. It is retained for compatibility
+// with the original API. New code should use NewInertiaWithError so setup
+// failures can be handled explicitly. It returns nil when initialization
+// fails; it never terminates the process.
 func NewInertia(a app.App, rootTemplatePath string, opts ...Option) *Inertia {
+	inertia, _ := NewInertiaWithError(a, rootTemplatePath, opts...)
+	return inertia
+}
+
+// NewInertiaWithError creates a new Inertia instance and returns any setup
+// error. User-supplied Options are collected into a Config, then translated
+// into gonertia options internally.
+func NewInertiaWithError(a app.App, rootTemplatePath string, opts ...Option) (*Inertia, error) {
 	cfg := &Config{
 		ContainerID: "app",
 	}
@@ -450,38 +462,48 @@ func NewInertia(a app.App, rootTemplatePath string, opts ...Option) *Inertia {
 
 	gi, err := gonertia.NewFromFile(rootTemplatePath, gOpts...)
 	if err != nil {
-		log.Fatal(err)
+		return nil, fmt.Errorf("initialize inertia root template: %w", err)
 	}
 
 	// Vite integration
 	if cfg.ViteEnabled {
-		setupVite(gi, cfg.ViteCfg)
+		if err := setupVite(gi, cfg.ViteCfg); err != nil {
+			return nil, err
+		}
 	} else {
 		setupLegacyVite(gi)
 	}
 
 	gi.ShareTemplateData("env", a.Config().Get("app.env"))
 
-	return &Inertia{inner: gi}
+	return &Inertia{inner: gi}, nil
 }
 
 // ---------------------------------------------------------------------------
 // Vite setup
 // ---------------------------------------------------------------------------
 
-func setupVite(gi *gonertia.Inertia, cfg *ViteConfig) {
+func setupVite(gi *gonertia.Inertia, cfg *ViteConfig) error {
+	if cfg == nil {
+		return errors.New("vite setup: nil configuration")
+	}
 	viteOpts := viteConfigToGonertiaOpts(cfg)
 	if cfg.EmbedFS != nil {
-		_, err := gonertia.NewViteFromFS(gi, cfg.EmbedFS.(fs.FS), viteOpts...)
+		embedFS, ok := cfg.EmbedFS.(fs.FS)
+		if !ok {
+			return errors.New("vite setup from embed.FS: configured value does not implement fs.FS")
+		}
+		_, err := gonertia.NewViteFromFS(gi, embedFS, viteOpts...)
 		if err != nil {
-			log.Fatalf("vite setup from embed.FS: %s", err)
+			return fmt.Errorf("vite setup from embed.FS: %w", err)
 		}
 	} else {
 		_, err := gonertia.NewVite(gi, viteOpts...)
 		if err != nil {
-			log.Fatalf("vite setup: %s", err)
+			return fmt.Errorf("vite setup: %w", err)
 		}
 	}
+	return nil
 }
 
 func setupLegacyVite(gi *gonertia.Inertia) {
@@ -801,7 +823,9 @@ func Get(a app.App) *Inertia {
 func Vite(manifestPath, buildDir string) func(p string) (string, error) {
 	f, err := os.Open(manifestPath)
 	if err != nil {
-		log.Fatalf("cannot open provided vite manifest file: %s", err)
+		return func(string) (string, error) {
+			return "", fmt.Errorf("cannot open provided vite manifest file: %w", err)
+		}
 	}
 	defer f.Close()
 
@@ -810,12 +834,10 @@ func Vite(manifestPath, buildDir string) func(p string) (string, error) {
 		Source string `json:"src"`
 	})
 	err = json.NewDecoder(f).Decode(&viteAssets)
-	for k, v := range viteAssets {
-		log.Printf("%s: %s\n", k, v.File)
-	}
-
 	if err != nil {
-		log.Fatalf("cannot unmarshal vite manifest file to json: %s", err)
+		return func(string) (string, error) {
+			return "", fmt.Errorf("cannot unmarshal vite manifest file to json: %w", err)
+		}
 	}
 
 	return func(p string) (string, error) {

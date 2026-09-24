@@ -1,6 +1,6 @@
 module github.com/lemmego/inertia
 
-go 1.25.0
+go 1.27
 
 require (
 	github.com/lemmego/api v0.1.3
