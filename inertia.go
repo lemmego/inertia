@@ -487,6 +487,21 @@ func setupVite(gi *gonertia.Inertia, cfg *ViteConfig) error {
 	if cfg == nil {
 		return errors.New("vite setup: nil configuration")
 	}
+
+	// Available on the configured path too, so a template written against it
+	// works however Vite was set up.
+	hot, manifest, build := cfg.HotFile, cfg.BuildManifest, cfg.BuildDir
+	if hot == "" {
+		hot = ViteHotPath
+	}
+	if manifest == "" {
+		manifest = InertiaManifestPath
+	}
+	if build == "" {
+		build = InertiaBuildPath
+	}
+	gi.ShareTemplateFunc("viteTags", viteTags(hot, manifest, build))
+
 	viteOpts := viteConfigToGonertiaOpts(cfg)
 	if cfg.EmbedFS != nil {
 		embedFS, ok := cfg.EmbedFS.(fs.FS)
@@ -507,6 +522,11 @@ func setupVite(gi *gonertia.Inertia, cfg *ViteConfig) error {
 }
 
 func setupLegacyVite(gi *gonertia.Inertia) {
+	// viteTags emits the whole tag for an entry rather than just its URL, so a
+	// template does not have to know that a stylesheet is loaded differently
+	// in development than from a build.
+	gi.ShareTemplateFunc("viteTags", viteTags(ViteHotPath, InertiaManifestPath, InertiaBuildPath))
+
 	_, err := os.Stat(ViteHotPath)
 	if err == nil {
 		gi.ShareTemplateFunc("vite", func(entry string) (string, error) {
