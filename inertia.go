@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lemmego/api/app"
@@ -222,7 +223,19 @@ func (p *Provider) Provide(a app.App) error {
 // ---------------------------------------------------------------------------
 
 // Flash implements FlashProvider using in-memory maps keyed by session ID.
+// flashStore is the default in-memory FlashProvider, installed by
+// Provider.Provide for every Inertia application.
+//
+// The mutex is not optional. One store is shared by every request in the
+// process, and three bare maps written from concurrent handlers is a
+// concurrent map write — a fatal runtime error that no recoverer can catch,
+// so it takes the process down rather than the request.
+//
+// Being in-memory, it is also per-process: flash data set by one instance is
+// invisible to another, so a multi-instance deployment behind a load balancer
+// wants a session-backed provider via WithFlashProvider instead.
 type flashStore struct {
+	mu           sync.Mutex
 	errors       map[string]ValidationErrors
 	flash        map[string]Flash
 	clearHistory map[string]bool
@@ -239,6 +252,8 @@ func NewFlash() FlashProvider {
 
 func (p *flashStore) FlashErrors(ctx context.Context, errors ValidationErrors) error {
 	if sessionID, ok := ctx.Value("sessionID").(string); ok {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		p.errors[sessionID] = errors
 	}
 	return nil
@@ -247,6 +262,8 @@ func (p *flashStore) FlashErrors(ctx context.Context, errors ValidationErrors) e
 func (p *flashStore) GetErrors(ctx context.Context) (ValidationErrors, error) {
 	var result ValidationErrors
 	if sessionID, ok := ctx.Value("sessionID").(string); ok {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		result = p.errors[sessionID]
 		p.errors[sessionID] = nil
 	}
@@ -255,6 +272,8 @@ func (p *flashStore) GetErrors(ctx context.Context) (ValidationErrors, error) {
 
 func (p *flashStore) ShouldClearHistory(ctx context.Context) (bool, error) {
 	if sessionID, ok := ctx.Value("sessionID").(string); ok {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		clearHistory := p.clearHistory[sessionID]
 		delete(p.clearHistory, sessionID)
 		return clearHistory, nil
@@ -264,6 +283,8 @@ func (p *flashStore) ShouldClearHistory(ctx context.Context) (bool, error) {
 
 func (p *flashStore) FlashClearHistory(ctx context.Context) error {
 	if sessionID, ok := ctx.Value("sessionID").(string); ok {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		p.clearHistory[sessionID] = true
 	}
 	return nil
@@ -271,6 +292,8 @@ func (p *flashStore) FlashClearHistory(ctx context.Context) error {
 
 func (p *flashStore) Flash(ctx context.Context, flash Flash) error {
 	if sessionID, ok := ctx.Value("sessionID").(string); ok {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		p.flash[sessionID] = flash
 	}
 	return nil
@@ -278,11 +301,18 @@ func (p *flashStore) Flash(ctx context.Context, flash Flash) error {
 
 func (p *flashStore) GetFlash(ctx context.Context) (Flash, error) {
 	if sessionID, ok := ctx.Value("sessionID").(string); ok {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		flash := p.flash[sessionID]
 		delete(p.flash, sessionID)
 		return flash, nil
 	}
-	return Flash{}, errors.New("sessionID missing for inertia")
+	// No session means no flash data, which is the ordinary case for an
+	// anonymous visitor — a fact, not a failure. This was the only one of the
+	// six FlashProvider methods to report it as an error, and gonertia logs
+	// whatever it gets back, so it produced a warning on every anonymous
+	// request as soon as a real logger was attached.
+	return Flash{}, nil
 }
 
 // ---------------------------------------------------------------------------
