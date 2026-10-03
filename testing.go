@@ -23,18 +23,18 @@ var _ T = (*testing.T)(nil)
 // ---------------------------------------------------------------------------
 
 type assertablePage struct {
-	Component      string                   `json:"component"`
-	Props          map[string]any           `json:"props"`
-	Flash          Flash                    `json:"flash,omitempty"`
-	URL            string                   `json:"url"`
-	Version        string                   `json:"version"`
-	EncryptHistory bool                     `json:"encryptHistory"`
-	ClearHistory   bool                     `json:"clearHistory"`
-	DeferredProps  map[string][]string      `json:"deferredProps,omitempty"`
-	MergeProps     []string                 `json:"mergeProps,omitempty"`
-	PrependProps   []string                 `json:"prependProps,omitempty"`
-	DeepMergeProps []string                 `json:"deepMergeProps,omitempty"`
-	MatchPropsOn   []string                 `json:"matchPropsOn,omitempty"`
+	Component      string                    `json:"component"`
+	Props          map[string]any            `json:"props"`
+	Flash          Flash                     `json:"flash,omitempty"`
+	URL            string                    `json:"url"`
+	Version        string                    `json:"version"`
+	EncryptHistory bool                      `json:"encryptHistory"`
+	ClearHistory   bool                      `json:"clearHistory"`
+	DeferredProps  map[string][]string       `json:"deferredProps,omitempty"`
+	MergeProps     []string                  `json:"mergeProps,omitempty"`
+	PrependProps   []string                  `json:"prependProps,omitempty"`
+	DeepMergeProps []string                  `json:"deepMergeProps,omitempty"`
+	MatchPropsOn   []string                  `json:"matchPropsOn,omitempty"`
 	ScrollProps    map[string]map[string]any `json:"scrollProps,omitempty"`
 }
 

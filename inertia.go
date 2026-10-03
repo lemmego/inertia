@@ -197,6 +197,13 @@ type Provider struct {
 }
 
 func (p *Provider) Provide(a app.App) error {
+	// Before anything reads the hot file. A production process that finds one
+	// points both its assets and its renderer at a dev server that is not
+	// running, and says nothing about it.
+	if err := guardHotFile(a.Config().Get("app.env") == "production"); err != nil {
+		return err
+	}
+
 	root := p.RootTemplate
 	if root == "" {
 		root = InertiaRootTemplatePath
@@ -411,6 +418,10 @@ func IsInertiaRequest(r *http.Request) bool {
 // imports gonertia directly.
 type Inertia struct {
 	inner *gonertia.Inertia
+	// cfg is kept so CheckSSR can reach the render URL and HTTP client. The
+	// alternative is re-resolving them, which would report on a different
+	// endpoint from the one actually in use.
+	cfg *Config
 }
 
 // InertiaResponse implements the Renderer interface so it can be passed to
@@ -526,7 +537,7 @@ func NewInertiaWithError(a app.App, rootTemplatePath string, opts ...Option) (*I
 
 	gi.ShareTemplateData("env", a.Config().Get("app.env"))
 
-	return &Inertia{inner: gi}, nil
+	return &Inertia{inner: gi, cfg: cfg}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -928,7 +939,15 @@ const defaultSSRTimeout = 3 * time.Second
 type slogLogger struct{}
 
 func (slogLogger) Printf(format string, v ...any) {
-	slog.Warn("inertia: " + fmt.Sprintf(format, v...))
+	message := fmt.Sprintf(format, v...)
+	// gonertia reports a failed server-side render through this one call, and
+	// the failure is otherwise invisible: it falls back to the
+	// client-rendered container, so the response is still 200. Counting here
+	// is what makes the degradation detectable. See SSRFailures.
+	if strings.Contains(message, "ssr rendering error") {
+		noteSSRFailure()
+	}
+	slog.Warn("inertia: " + message)
 }
 
 func (slogLogger) Println(v ...any) {
