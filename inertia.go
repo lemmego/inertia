@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -437,6 +438,16 @@ func NewInertiaWithError(a app.App, rootTemplatePath string, opts ...Option) (*I
 	}
 	if cfg.SSRHTTPClient != nil {
 		gOpts = append(gOpts, gonertia.WithSSRHTTPClient(cfg.SSRHTTPClient.(*http.Client)))
+	} else if cfg.SSRURL != "" {
+		// gonertia defaults to a bare &http.Client{}, which has no timeout.
+		// A dead SSR process fails fast and falls back; a *hung* one — a
+		// render stuck in a loop, a Node process paused by the OS — would
+		// hold the request, its goroutine and its connection indefinitely,
+		// and enough of those is the whole site. A render slower than this
+		// should degrade to client rendering, not queue.
+		gOpts = append(gOpts, gonertia.WithSSRHTTPClient(
+			&http.Client{Timeout: defaultSSRTimeout},
+		))
 	}
 	if cfg.ContainerID != "" && cfg.ContainerID != "app" {
 		gOpts = append(gOpts, gonertia.WithContainerID(cfg.ContainerID))
@@ -449,10 +460,19 @@ func NewInertiaWithError(a app.App, rootTemplatePath string, opts ...Option) (*I
 			&gonertiaJSONMarshallerBridge{m: cfg.JSONMarshaller},
 		))
 	}
+	// A logger, always. gonertia defaults to log.New(io.Discard, …), and the
+	// only diagnostic it emits for a failed server-side render is a single
+	// Printf. With that discarded, an SSR process that is down or broken is
+	// undetectable at the HTTP layer: gonertia falls back to the
+	// client-rendered container, so the page still answers 200 and still
+	// looks right to a person, while a crawler receives an empty
+	// <div id="app"> and nothing anywhere says so.
 	if cfg.Logger != nil {
 		gOpts = append(gOpts, gonertia.WithLogger(
 			&gonertiaLoggerBridge{l: cfg.Logger},
 		))
+	} else {
+		gOpts = append(gOpts, gonertia.WithLogger(&slogLogger{}))
 	}
 	if cfg.FlashProvider != nil {
 		gOpts = append(gOpts, gonertia.WithFlashProvider(
@@ -866,4 +886,21 @@ func Vite(manifestPath, buildDir string) func(p string) (string, error) {
 		}
 		return "", fmt.Errorf("asset %q not found", p)
 	}
+}
+
+// defaultSSRTimeout bounds a server-side render request when the caller
+// supplied no HTTP client of its own. Use WithSSRHTTPClient to change it.
+const defaultSSRTimeout = 3 * time.Second
+
+// slogLogger is the default gonertia logger: it routes gonertia's messages
+// into the application's structured log at WARN, because the only thing
+// gonertia logs is a failure.
+type slogLogger struct{}
+
+func (slogLogger) Printf(format string, v ...any) {
+	slog.Warn("inertia: " + fmt.Sprintf(format, v...))
+}
+
+func (slogLogger) Println(v ...any) {
+	slog.Warn("inertia: " + strings.TrimSuffix(fmt.Sprintln(v...), "\n"))
 }
