@@ -67,6 +67,13 @@ type Config struct {
 	Logger          Logger
 	ViteEnabled     bool
 	ViteCfg         *ViteConfig
+	// StrictSSR overrides what a failed render does. Nil means "strict
+	// outside production", which is the default and almost always right.
+	StrictSSR *bool
+	// SSRProbeComponent is a component CheckSSR renders to prove the
+	// renderer produces documents. Empty means a shallow probe. See
+	// CheckSSR.
+	SSRProbeComponent string
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +108,32 @@ func (s withSSREnabled) Apply(c *Config) { c.SSREnabled = true }
 // In development mode, the Vite dev server URL is auto-detected from the
 // hot file. In production, defaults to http://127.0.0.1:13714.
 func WithSSR() Option { return withSSREnabled{} }
+
+type withStrictSSR struct{ strict bool }
+
+func (s withStrictSSR) Apply(c *Config) { c.StrictSSR = &s.strict }
+
+// WithStrictSSR decides what a failed server-side render does.
+//
+// Strict, a failed render is a 500. Not strict, it is the client-rendered
+// fallback plus an error log and a counter. Left unset it is strict outside
+// production — see ssr_guard.go for why that asymmetry is deliberate.
+func WithStrictSSR(strict bool) Option { return withStrictSSR{strict: strict} }
+
+type withSSRProbeComponent string
+
+func (p withSSRProbeComponent) Apply(c *Config) { c.SSRProbeComponent = string(p) }
+
+// WithSSRProbeComponent names a page CheckSSR renders to probe the renderer.
+//
+// It turns a shallow probe — "the renderer is alive" — into a deep one: "the
+// renderer produces server-rendered documents". The component must render
+// with no props at all, so it is a page written for the purpose rather than a
+// real one, because a real page given empty props throws and a probe that
+// fails against a healthy renderer is worse than no probe.
+func WithSSRProbeComponent(component string) Option {
+	return withSSRProbeComponent(component)
+}
 
 type withSSR struct{ url string }
 
@@ -220,9 +253,31 @@ func (p *Provider) Provide(a app.App) error {
 	if err != nil {
 		return err
 	}
+
+	// Strict outside production unless the application said otherwise. Set
+	// here rather than inside NewInertia because this is the one place that
+	// knows the environment.
+	strict := ssrStrictFromEnv(configString(a, "app.env"))
+	if inertia.cfg.StrictSSR != nil {
+		strict = *inertia.cfg.StrictSSR
+	}
+	SetStrictSSR(strict)
+	if inertia.cfg.SSREnabled && !strict {
+		slog.Info("inertia: a failed server-side render will serve a client-rendered page rather than an error",
+			"strict", false)
+	}
+
 	a.AddService(inertia)
 	a.Router().Use(inertia.Middleware)
 	return nil
+}
+
+// configString reads a config value as a string, tolerating its absence.
+func configString(a app.App, key string) string {
+	if value, ok := a.Config().Get(key).(string); ok {
+		return value
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -858,7 +913,13 @@ func (ir *InertiaResponse) Render(w io.Writer) error {
 	if ir.ctx.Status() == 0 {
 		ir.ctx.SetStatus(http.StatusOK)
 	}
-	return ir.inner.Render(w.(http.ResponseWriter), ir.ctx.Request(), ir.filePath, ir.gProps)
+	// Through the guard, so a document that came back without
+	// server-rendered markup is a reported failure rather than a silent
+	// blank page. See ssr_guard.go.
+	return ir.guardedRender(w.(http.ResponseWriter), ir.ctx.Request(), ir.filePath,
+		func(target http.ResponseWriter) error {
+			return ir.inner.Render(target, ir.ctx.Request(), ir.filePath, ir.gProps)
+		})
 }
 
 // ---------------------------------------------------------------------------

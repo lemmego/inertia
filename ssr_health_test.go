@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -128,5 +129,160 @@ func TestNoHotFileIsFine(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := guardHotFile(true); err != nil {
 		t.Errorf("production boot was refused with no hot file: %v", err)
+	}
+}
+
+// ssrServer stands in for the Node renderer.
+func ssrServer(t *testing.T, status int, body string) *Inertia {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/render" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`not found`))
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return &Inertia{cfg: &Config{SSREnabled: true, SSRURL: server.URL}}
+}
+
+// TestAShallowProbeAcceptsARefusal is the regression for a check that could
+// never pass.
+//
+// The probe asks for a component the bundle cannot have, so a correct
+// renderer answers 500 — and the first version of this checked the status
+// before the body, reporting every healthy development renderer as unusable.
+// The comment already said a refusal with a body was fine; the code
+// disagreed with it.
+func TestAShallowProbeAcceptsARefusal(t *testing.T) {
+	renderer := ssrServer(t, http.StatusInternalServerError,
+		`{"error":"Inertia SSR: no page component at ./Pages/__inertia_probe__.tsx"}`)
+
+	health := renderer.CheckSSR(context.Background())
+	if !health.OK {
+		t.Fatalf("a live renderer refusing the probe component was reported unusable: %s", health.Err)
+	}
+	if health.Deep {
+		t.Error("the probe reported itself deep with no component configured")
+	}
+	if health.Component != ProbeComponent {
+		t.Errorf("component = %q", health.Component)
+	}
+	if health.Status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want the renderer's own", health.Status)
+	}
+}
+
+// TestAnEmptyBodyIsAlwaysAFailure — the blind spot a TCP check has and the
+// reason this probe exists. A Node process listening with a broken module
+// graph accepts the connection and renders nothing.
+func TestAnEmptyBodyIsAlwaysAFailure(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusInternalServerError} {
+		renderer := ssrServer(t, status, "")
+		health := renderer.CheckSSR(context.Background())
+		if health.OK {
+			t.Errorf("status %d with an empty body was reported healthy", status)
+		}
+		if !strings.Contains(health.Err, "bundle is not loaded") {
+			t.Errorf("status %d: err = %q", status, health.Err)
+		}
+	}
+}
+
+// TestADeepProbeRequiresServerRenderedMarkup. This is the condition a shallow
+// probe cannot see: a renderer that fails on every component, not just
+// unknown ones.
+func TestADeepProbeRequiresServerRenderedMarkup(t *testing.T) {
+	t.Run("a real render passes", func(t *testing.T) {
+		renderer := ssrServer(t, http.StatusOK,
+			`{"body":"<div id=\"app\" data-server-rendered=\"true\">ok</div>","head":[]}`)
+		renderer.cfg.SSRProbeComponent = "Health/Probe"
+
+		health := renderer.CheckSSR(context.Background())
+		if !health.OK {
+			t.Fatalf("a working renderer failed the deep probe: %s", health.Err)
+		}
+		if !health.Deep {
+			t.Error("the probe did not report itself deep")
+		}
+	})
+
+	t.Run("a broken bundle fails", func(t *testing.T) {
+		renderer := ssrServer(t, http.StatusInternalServerError,
+			"{\"error\":\"Cannot find module './chunk-abc.js'\"}\nstack...")
+		renderer.cfg.SSRProbeComponent = "Health/Probe"
+
+		health := renderer.CheckSSR(context.Background())
+		if health.OK {
+			t.Fatal("a renderer failing every component passed the deep probe")
+		}
+		// The message carries the renderer's first line and not its stack.
+		if !strings.Contains(health.Err, "Cannot find module") {
+			t.Errorf("err = %q", health.Err)
+		}
+		if strings.Contains(health.Err, "stack...") {
+			t.Errorf("the stack trace reached the health response: %q", health.Err)
+		}
+	})
+
+	t.Run("a 200 with no markup fails", func(t *testing.T) {
+		// The silent fallback itself: a document that renders, with an empty
+		// container.
+		renderer := ssrServer(t, http.StatusOK, `{"body":"<div id=\"app\"></div>","head":[]}`)
+		renderer.cfg.SSRProbeComponent = "Health/Probe"
+
+		health := renderer.CheckSSR(context.Background())
+		if health.OK {
+			t.Fatal("a document with an empty container passed the deep probe")
+		}
+		if !strings.Contains(health.Err, "no server-rendered markup") {
+			t.Errorf("err = %q", health.Err)
+		}
+	})
+}
+
+// TestAMissingEndpointIsReportedAsConfiguration, because the fix is different
+// from a broken bundle.
+func TestAMissingEndpointIsReportedAsConfiguration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("Cannot POST /render"))
+	}))
+	defer server.Close()
+
+	renderer := &Inertia{cfg: &Config{SSREnabled: true, SSRURL: server.URL}}
+	health := renderer.CheckSSR(context.Background())
+	if health.OK {
+		t.Fatal("a 404 was reported healthy")
+	}
+	if !strings.Contains(health.Err, "no render endpoint") {
+		t.Errorf("err = %q", health.Err)
+	}
+}
+
+func TestAnUnreachableRendererIsReported(t *testing.T) {
+	// A port nothing is listening on.
+	renderer := &Inertia{cfg: &Config{SSREnabled: true, SSRURL: "http://127.0.0.1:1"}}
+	health := renderer.CheckSSR(context.Background())
+	if health.OK {
+		t.Fatal("an unreachable renderer was reported healthy")
+	}
+	if health.Err == "" {
+		t.Error("no reason given")
+	}
+}
+
+func TestSSRDisabledIsNotAFailure(t *testing.T) {
+	renderer := &Inertia{cfg: &Config{SSREnabled: false}}
+	health := renderer.CheckSSR(context.Background())
+	if health.Enabled {
+		t.Error("reported enabled")
+	}
+	// Not OK and not an error either: there is nothing to be unhealthy about,
+	// which is for the caller to interpret.
+	if health.Err != "" {
+		t.Errorf("err = %q", health.Err)
 	}
 }

@@ -38,6 +38,11 @@ func SSRFailures() uint64 { return ssrFailures.Load() }
 // reports a failed render.
 func noteSSRFailure() { ssrFailures.Add(1) }
 
+// ProbeComponent is the component name a shallow probe asks for.
+//
+// Deliberately one the bundle cannot have. See CheckSSR.
+const ProbeComponent = "__inertia_probe__"
+
 // SSRHealth is what a readiness check reports.
 type SSRHealth struct {
 	// Enabled is whether this process is configured to server-render at all.
@@ -46,6 +51,14 @@ type SSRHealth struct {
 	URL string
 	// OK is whether the render endpoint answered a probe.
 	OK bool
+	// Deep is whether the probe rendered a real page and got server-rendered
+	// markup back, rather than only establishing that the renderer is alive.
+	// See CheckSSR for the difference and why it matters.
+	Deep bool
+	// Component is what the probe asked the renderer for.
+	Component string
+	// Status is the render endpoint's HTTP status.
+	Status int
 	// Failures is the process's cumulative fallback count.
 	Failures uint64
 	// Err describes why a probe failed.
@@ -54,16 +67,50 @@ type SSRHealth struct {
 
 // CheckSSR probes the render endpoint.
 //
-// It POSTs a minimal page and requires a non-empty body back, rather than
-// dialling the port. A Node process that is listening with a broken module
-// graph passes a TCP check and fails every render, which is precisely the
-// state this is meant to catch — the CLI's own health check dials the port
-// and so cannot see it.
+// It POSTs a page and reads the answer, rather than dialling the port. A Node
+// process listening with a broken module graph passes a TCP check and fails
+// every render, which is precisely the state this exists to catch — and the
+// CLI's own health check dials the port, so it cannot see it.
+//
+// There are two levels, and the difference is worth understanding before
+// trusting the result.
+//
+// **Shallow**, the default. The probe asks for ProbeComponent, a name the
+// bundle cannot have, so the renderer is *expected* to refuse it — and a
+// refusal with a body is the signal: the process is up, the module graph
+// loaded, and the bundle's router ran far enough to decide the component does
+// not exist. The status is not required to be 200, because a correct renderer
+// answering this question says 500.
+//
+// That is a real check and a shallow one. It cannot distinguish a renderer
+// that fails only on unknown components from one that fails on all of them,
+// which is the condition that matters most.
+//
+// **Deep**, when the application sets WithSSRProbeComponent. The probe asks
+// for a real page and requires 200 and server-rendered markup back, which
+// proves the thing an operator actually wants to know: this renderer produces
+// documents. It needs a component that renders with no props — a page built
+// for the purpose — because a real page given empty props throws, and a probe
+// that fails against a healthy renderer is worse than no probe.
+//
+// The first version of this checked the status before the body and so
+// reported every healthy development renderer as unusable, because the
+// unknown probe component legitimately answers 500. The comment said a
+// refusal with a body was fine; the code disagreed with the comment.
 func (i *Inertia) CheckSSR(ctx context.Context) SSRHealth {
+	component := ProbeComponent
+	deep := false
+	if configured := strings.TrimSpace(i.cfg.SSRProbeComponent); configured != "" {
+		component = configured
+		deep = true
+	}
+
 	health := SSRHealth{
-		Enabled:  i.cfg.SSREnabled,
-		URL:      i.cfg.SSRURL,
-		Failures: SSRFailures(),
+		Enabled:   i.cfg.SSREnabled,
+		URL:       i.cfg.SSRURL,
+		Component: component,
+		Deep:      deep,
+		Failures:  SSRFailures(),
 	}
 	if !health.Enabled {
 		return health
@@ -79,7 +126,7 @@ func (i *Inertia) CheckSSR(ctx context.Context) SSRHealth {
 	}
 
 	probe := map[string]any{
-		"component":      "__inertia_probe__",
+		"component":      component,
 		"props":          map[string]any{},
 		"url":            "/",
 		"version":        "",
@@ -112,20 +159,62 @@ func (i *Inertia) CheckSSR(ctx context.Context) SSRHealth {
 		health.Err = err.Error()
 		return health
 	}
-	if response.StatusCode != http.StatusOK {
-		health.Err = fmt.Sprintf("render endpoint answered %d", response.StatusCode)
-		return health
-	}
-	// A component the bundle does not know is expected to fail, but the
-	// server must still answer with a body. An empty one means the bundle
-	// never loaded.
+	health.Status = response.StatusCode
+
+	// An empty body means the bundle never loaded, at either level. This is
+	// the TCP check's blind spot and the reason this function exists.
 	if len(bytes.TrimSpace(answer)) == 0 {
 		health.Err = "render endpoint answered with an empty body, so the SSR bundle is not loaded"
 		return health
 	}
 
+	// A 404 is the endpoint itself being wrong — a renderer at another path,
+	// or a dev server that is not serving the SSR route — rather than a
+	// renderer refusing a component. Worth separating, because the fix is
+	// different: configuration rather than a broken bundle.
+	if response.StatusCode == http.StatusNotFound {
+		health.Err = fmt.Sprintf("there is no render endpoint at %s", endpoint)
+		return health
+	}
+
+	if !health.Deep {
+		// Shallow: the renderer answered about a component it cannot have,
+		// which means it is up and executing. A 500 here is the correct
+		// answer to the question asked.
+		health.OK = true
+		return health
+	}
+
+	if response.StatusCode != http.StatusOK {
+		health.Err = fmt.Sprintf("rendering %s answered %d: %s",
+			component, response.StatusCode, firstLine(answer))
+		return health
+	}
+	// Deep: and it produced server-rendered markup. A 200 holding a document
+	// with an empty container is the silent fallback, which is the whole
+	// failure mode being probed for.
+	if !renderedMarkup(answer) {
+		health.Err = fmt.Sprintf(
+			"rendering %s answered 200 with no server-rendered markup, so every page falls back to client rendering",
+			component)
+		return health
+	}
+
 	health.OK = true
 	return health
+}
+
+// firstLine trims a renderer's error payload to something a health response
+// can carry without embedding a stack trace in a monitoring page.
+func firstLine(payload []byte) string {
+	text := strings.TrimSpace(string(payload))
+	if index := strings.IndexAny(text, "\r\n"); index >= 0 {
+		text = text[:index]
+	}
+	if len(text) > 200 {
+		text = text[:200] + "…"
+	}
+	return text
 }
 
 // ErrHotFileInProduction is returned when a production process finds a Vite
@@ -151,4 +240,26 @@ func guardHotFile(inProduction bool) error {
 		return ErrHotFileInProduction
 	}
 	return nil
+}
+
+// renderedMarkup reports whether an SSR response carries server-rendered
+// markup.
+//
+// The renderer answers JSON — {"body": "<div …>", "head": […]} — so the
+// marker arrives inside a JSON string with its quotes escaped, and scanning
+// the raw bytes for `data-server-rendered="true"` never matches. Decoding
+// first is the difference between a probe that works and one that reports
+// every healthy renderer as broken; a test caught this, which is the only
+// reason it is not in the shipped code.
+//
+// A payload that is not that shape falls back to a raw scan, so a renderer
+// that answers HTML directly is still understood.
+func renderedMarkup(payload []byte) bool {
+	var page struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(payload, &page); err == nil && page.Body != "" {
+		return strings.Contains(page.Body, ServerRenderedMarker)
+	}
+	return bytes.Contains(payload, []byte(ServerRenderedMarker))
 }
