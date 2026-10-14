@@ -541,8 +541,16 @@ func NewInertiaWithError(a app.App, rootTemplatePath string, opts ...Option) (*I
 		// hold the request, its goroutine and its connection indefinitely,
 		// and enough of those is the whole site. A render slower than this
 		// should degrade to client rendering, not queue.
+		// The transport re-resolves the renderer address per render rather
+		// than trusting the one detected at boot. See ssr_resolve.go: with a
+		// single boot-time lookup, a fresh project answered 500 on every page
+		// under `lemmego dev`, because air starts before vite has published
+		// ./public/hot and the address was then fixed for the process.
 		gOpts = append(gOpts, gonertia.WithSSRHTTPClient(
-			&http.Client{Timeout: defaultSSRTimeout},
+			&http.Client{
+				Timeout:   defaultSSRTimeout,
+				Transport: newSSRTransport(nil),
+			},
 		))
 	}
 	if cfg.ContainerID != "" && cfg.ContainerID != "app" {
@@ -726,7 +734,7 @@ func detectSSRURL() string {
 			return viteURL + "/__inertia_ssr"
 		}
 	}
-	return "http://127.0.0.1:13714"
+	return standaloneSSRURL
 }
 
 // probeVitePort probes TCP ports starting from startPort to find a listening
