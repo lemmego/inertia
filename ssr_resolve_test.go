@@ -83,6 +83,50 @@ func TestWithNoHotFileTheAddressIsTheStandaloneRenderer(t *testing.T) {
 	}
 }
 
+// And the request has to arrive at /render, which is the production path and
+// the one this transport nearly broke.
+//
+// The standalone address is bare, so url.Parse gives it an empty Path.
+// Assigning that over the request's path replaced gonertia's "/render" with
+// "" and every render reached the renderer's root instead — a 500 on every
+// page, in production only. The earlier version of this test checked the
+// resolved *address* and never made a request, so it could not see it; a
+// scaffolded project booting against a real Node renderer could, and did.
+func TestWithNoHotFileTheRenderPathSurvives(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	paths := make(chan string, 1)
+	renderer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths <- r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer renderer.Close()
+
+	// The renderer is on a test port rather than 13714, so the resolution is
+	// pinned through the hot file and then the file is removed — leaving the
+	// transport to resolve the bare standalone address while the request
+	// itself still points somewhere reachable.
+	transport := newSSRTransport(nil)
+	transport.resolved = renderer.URL
+	transport.at = time.Now()
+	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+
+	request, err := http.NewRequest(http.MethodPost, renderer.URL+"/render", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("the render never arrived: %v", err)
+	}
+	defer response.Body.Close()
+
+	if got := <-paths; got != "/render" {
+		t.Fatalf("the renderer was asked for %q, want /render — a bare "+
+			"address must not blank out the path gonertia set", got)
+	}
+}
+
 // Re-reading the file on every render would put a syscall on the hot path for
 // no benefit in production, where the answer never changes.
 func TestTheResolvedAddressIsCached(t *testing.T) {

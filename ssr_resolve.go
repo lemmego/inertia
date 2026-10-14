@@ -75,8 +75,16 @@ func (s *ssrRedirector) RoundTrip(req *http.Request) (*http.Response, error) {
 	clone := req.Clone(req.Context())
 	clone.URL.Scheme = parsed.Scheme
 	clone.URL.Host = parsed.Host
-	clone.URL.Path = parsed.Path
 	clone.Host = parsed.Host
+	// Only when the resolved address carries a path of its own. The standalone
+	// renderer is bare — "http://127.0.0.1:13714" parses with an empty Path —
+	// so assigning it unconditionally replaced gonertia's "/render" with "",
+	// and every render in production reached the renderer's root and failed.
+	// The Vite dev server is the opposite case: its address *is* the endpoint
+	// ("…:5173/__inertia_ssr"), so there the path has to win.
+	if parsed.Path != "" && parsed.Path != "/" {
+		clone.URL.Path = parsed.Path
+	}
 	return s.base.RoundTrip(clone)
 }
 
