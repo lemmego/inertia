@@ -93,10 +93,10 @@ type SSRHealth struct {
 // for the purpose — because a real page given empty props throws, and a probe
 // that fails against a healthy renderer is worse than no probe.
 //
-// The first version of this checked the status before the body and so
-// reported every healthy development renderer as unusable, because the
-// unknown probe component legitimately answers 500. The comment said a
-// refusal with a body was fine; the code disagreed with the comment.
+// Check the body before the status. A renderer that does not know the probe
+// component legitimately answers 500, so a status-first check reports every
+// healthy development renderer as unusable; a refusal carrying a body is
+// proof the renderer is alive.
 func (i *Inertia) CheckSSR(ctx context.Context) SSRHealth {
 	component := ProbeComponent
 	deep := false

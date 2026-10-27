@@ -22,17 +22,15 @@ const standaloneSSRURL = "http://127.0.0.1:13714"
 // ssrRedirector rewrites each server-render request to wherever the renderer
 // is *now*, rather than wherever it was when the process booted.
 //
-// detectSSRURL used to be called once, in NewInertiaWithError, and that made a
-// fresh Inertia project answer 500 on every page under `lemmego dev`. The
-// chain: strict SSR is on outside production, so a failed render is an error
-// rather than a silent degrade; `lemmego dev` deliberately does not start the
-// standalone renderer, because @inertiajs/vite serves /__inertia_ssr from the
-// Vite dev server and a second renderer would be wrong; and the Vite URL is
-// published by writing ./public/hot. But dev starts air before vite, so on
-// first run the hot file does not exist yet, detectSSRURL returned the
-// standalone fallback at 127.0.0.1:13714, nothing was listening there, and the
-// URL was then fixed for the life of the process — so every page stayed a 500
-// until something happened to restart the binary.
+// Resolving once at construction cannot work under `lemmego dev`, and the
+// reason is a race worth knowing about. Strict SSR is on outside production,
+// so a failed render is an error rather than a silent degrade. `dev` does not
+// start the standalone renderer, because @inertiajs/vite already serves
+// /__inertia_ssr from the Vite dev server, and that URL is published by
+// writing ./public/hot. But `dev` starts air before vite, so on first run the
+// hot file does not exist yet — a single early lookup finds nothing listening
+// at the standalone fallback and then holds that address for the life of the
+// process, leaving every page a 500 until the binary restarts.
 //
 // Resolving per render closes it. gonertia takes its SSR URL as a string at
 // construction and we do not control that, but the HTTP client is ours, so the
