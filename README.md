@@ -127,11 +127,31 @@ preview and a reader with JavaScript disabled all get real markup.
 ```go
 inertia.WithSSR()                           // resolve the renderer automatically
 inertia.WithSSRAt("http://127.0.0.1:13714") // or point at it
+inertia.WithoutSSR()                        // off, said out loud
 ```
+
+**`INERTIA_SSR` overrides all of them**, so you can turn rendering off for an
+afternoon without editing `LoadProviders` and remembering to put it back:
+
+```bash
+INERTIA_SSR=false   # off, whatever the code says
+INERTIA_SSR=true    # on — for checking a page really does render server-side
+INERTIA_SSR=        # unset: the application decides
+```
+
+An unset or empty value means "as configured", and a value that is not a
+boolean means the same plus a warning — it will not take your process down.
 
 In development the renderer *is* the Vite dev server — `@inertiajs/vite`
 serves `/__inertia_ssr` — so you do not start a separate process. In
 production, `lemmego inertia-ssr` runs the built bundle.
+
+A renderer that has only just started answers **200 with the body `null`**
+for a second or two, because Vite transforms the SSR entry lazily. So the
+first page you open after `lemmego dev` comes up has no server-rendered
+marker through no fault of its own. A document render is retried once before
+it counts as a fallback, which turns that into one slow page rather than a
+500 — strict mode only, since outside it the fallback is already going out.
 
 ### A failed render is the failure you have to go looking for
 

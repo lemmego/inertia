@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 )
@@ -16,6 +18,14 @@ import (
 // ssr_health.go watches for: that depends on gonertia's wording, which is
 // somebody else's string literal, and it fires after the response has
 // already been decided. This is our own output.
+// EnvSSR turns server-side rendering on or off, overriding what
+// LoadProviders configured.
+//
+// For the afternoon you want to work on a page without a renderer in the way,
+// or the opposite — checking that a page really does render on the server
+// before you ship it.
+const EnvSSR = "INERTIA_SSR"
+
 const ServerRenderedMarker = `data-server-rendered="true"`
 
 // ErrSSRFellBack is returned by a document render that produced no
@@ -184,4 +194,27 @@ func (i *Inertia) guardedRender(real http.ResponseWriter, r *http.Request, compo
 // that teaches you nothing.
 func ssrStrictFromEnv(env string) bool {
 	return !strings.EqualFold(strings.TrimSpace(env), "production")
+}
+
+// ssrFromEnv reads INERTIA_SSR, reporting whether it said anything.
+//
+// Read directly rather than through config.MustEnv, which treats a variable
+// that is present and empty as a decision and panics on a value it cannot
+// parse. A stray `INERTIA_SSR=` line would otherwise mean something different
+// from an absent one, and a typo would take the process down before anything
+// could log why. Absent and empty both mean "whatever the application
+// configured"; an unreadable value means the same, plus a complaint.
+func ssrFromEnv() (enabled bool, set bool) {
+	raw := strings.TrimSpace(os.Getenv(EnvSSR))
+	if raw == "" {
+		return false, false
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		slog.Warn("inertia: INERTIA_SSR could not be read as a boolean, so "+
+			"server-side rendering stays as the application configured it",
+			"value", raw)
+		return false, false
+	}
+	return value, true
 }

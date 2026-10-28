@@ -107,7 +107,25 @@ func (s withSSREnabled) Apply(c *Config) { c.SSREnabled = true }
 // WithSSR enables server-side rendering with auto-detection.
 // In development mode, the Vite dev server URL is auto-detected from the
 // hot file. In production, defaults to http://127.0.0.1:13714.
+//
+// INERTIA_SSR in the environment overrides this either way, so a developer
+// can turn rendering off for an afternoon without editing LoadProviders. See
+// Provider.Provide.
 func WithSSR() Option { return withSSREnabled{} }
+
+type withSSRDisabled struct{}
+
+func (withSSRDisabled) Apply(c *Config) { c.SSREnabled = false }
+
+// WithoutSSR turns server-side rendering off.
+//
+// Mostly for the INERTIA_SSR override to apply, but also useful directly: it
+// says "off" at the call site, where leaving WithSSR out says nothing and
+// reads like an omission.
+//
+// Order matters — the last option wins — so this placed after WithSSR beats
+// it.
+func WithoutSSR() Option { return withSSRDisabled{} }
 
 type withStrictSSR struct{ strict bool }
 
@@ -248,6 +266,19 @@ func (p *Provider) Provide(a app.App) error {
 		WithFlashProvider(NewFlash()),
 	)
 	opts = append(opts, p.Options...)
+
+	// Last, so the environment beats whatever LoadProviders said. Turning
+	// rendering off for an afternoon should not mean editing Go and
+	// remembering to put it back.
+	if override, set := ssrFromEnv(); set {
+		if override {
+			opts = append(opts, WithSSR())
+		} else {
+			opts = append(opts, WithoutSSR())
+		}
+		slog.Info("inertia: server-side rendering was set from the environment",
+			"INERTIA_SSR", override)
+	}
 
 	inertia, err := NewInertiaWithError(a, root, opts...)
 	if err != nil {

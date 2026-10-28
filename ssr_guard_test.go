@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -305,5 +306,63 @@ func TestProductionDoesNotRetry(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), ServerRenderedMarker) {
 		t.Error("production served a retried render rather than the fallback")
+	}
+}
+
+// TestWithoutSSRBeatsWithSSR, because the override is implemented by
+// appending an option and the last one has to win.
+func TestWithoutSSRBeatsWithSSR(t *testing.T) {
+	cfg := &Config{}
+	WithSSR().Apply(cfg)
+	WithoutSSR().Apply(cfg)
+	if cfg.SSREnabled {
+		t.Error("WithoutSSR after WithSSR left rendering on, so the environment " +
+			"override cannot turn it off")
+	}
+
+	cfg = &Config{}
+	WithoutSSR().Apply(cfg)
+	WithSSR().Apply(cfg)
+	if !cfg.SSREnabled {
+		t.Error("WithSSR after WithoutSSR left rendering off")
+	}
+}
+
+// TestINERTIA_SSRIsReadSafely.
+//
+// Read directly rather than through config.MustEnv, which treats
+// present-and-empty as a decision and panics on an unparsable value. A stray
+// `INERTIA_SSR=` line must mean the same as no line at all, and a typo must
+// not take the process down before anything can log why.
+func TestINERTIA_SSRIsReadSafely(t *testing.T) {
+	for _, tc := range []struct {
+		raw         string
+		wantEnabled bool
+		wantSet     bool
+	}{
+		{"", false, false},
+		{"   ", false, false},
+		{"nonsense", false, false},
+		{"true", true, true},
+		{"1", true, true},
+		{"false", false, true},
+		{"0", false, true},
+		{" TRUE ", true, true},
+	} {
+		t.Setenv(EnvSSR, tc.raw)
+		enabled, set := ssrFromEnv()
+		if set != tc.wantSet || enabled != tc.wantEnabled {
+			t.Errorf("INERTIA_SSR=%q gave (enabled=%v set=%v), want (%v %v)",
+				tc.raw, enabled, set, tc.wantEnabled, tc.wantSet)
+		}
+	}
+}
+
+// TestAnUnsetINERTIA_SSRSaysNothing, so the application's own configuration
+// is what decides.
+func TestAnUnsetINERTIA_SSRSaysNothing(t *testing.T) {
+	os.Unsetenv(EnvSSR)
+	if _, set := ssrFromEnv(); set {
+		t.Error("an unset INERTIA_SSR claimed to have an opinion")
 	}
 }
