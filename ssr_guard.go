@@ -136,6 +136,29 @@ func (i *Inertia) guardedRender(real http.ResponseWriter, r *http.Request, compo
 		return capture.flushTo(real)
 	}
 
+	// A renderer that has only just started answers 200 with an empty body
+	// for a second or two: Vite transforms the SSR entry lazily, so the first
+	// document rendered after `lemmego dev` comes up has no marker through no
+	// fault of the page. Retrying once turns that into one slow page instead
+	// of a 500 on whatever somebody happened to open first.
+	//
+	// Strict mode only. Outside it the fallback is already going out, and
+	// making a real visitor wait for a second attempt is the wrong trade —
+	// the fallback exists precisely so they do not have to.
+	//
+	// The failure is not counted when the retry succeeds, because a warmup is
+	// not a fallback: inflating the counter would make the health check and
+	// SSRFailures() report a problem that resolved itself.
+	if StrictSSR() {
+		retry := newCaptureWriter(real)
+		if err := render(retry); err == nil && retry.serverRendered() {
+			slog.Warn("inertia: a page rendered only on the second attempt, which "+
+				"is what a renderer that has just started looks like",
+				"component", component, "path", r.URL.Path)
+			return retry.flushTo(real)
+		}
+	}
+
 	// The render fell back. gonertia has already logged its own reason, which
 	// is the part that says *why*; this says which page, and is at error
 	// level because every visitor to it is getting a blank document.

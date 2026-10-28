@@ -208,3 +208,102 @@ func TestStrictnessComesFromTheEnvironment(t *testing.T) {
 		}
 	}
 }
+
+// warmingRenderer answers with an un-rendered document the first n times and
+// a rendered one after, which is what Vite's /__inertia_ssr does for a second
+// or two after it starts: 200 with no markup while it transforms the SSR
+// entry lazily.
+func warmingRenderer(coldAttempts int) (func(http.ResponseWriter) error, *int) {
+	attempts := 0
+	return func(w http.ResponseWriter) error {
+		attempts++
+		body := renderedDocument
+		if attempts <= coldAttempts {
+			body = fallbackDocument
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, err := w.Write([]byte(body))
+		return err
+	}, &attempts
+}
+
+// TestAWarmingRendererIsRetriedRatherThanFailed.
+//
+// Vite answers 200 with an empty body for the first second or two after it
+// starts, so the first page somebody opens after `lemmego dev` comes up had
+// no marker through no fault of its own and got a 500. One retry turns that
+// into one slow page.
+func TestAWarmingRendererIsRetriedRatherThanFailed(t *testing.T) {
+	SetStrictSSR(true)
+	t.Cleanup(func() { SetStrictSSR(true) })
+
+	before := SSRFailures()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/@ada", nil)
+
+	render, attempts := warmingRenderer(1)
+	err := guardedInertia(true).guardedRender(recorder, request, "Profiles/Show", render)
+
+	if err != nil {
+		t.Fatalf("err = %v, want the retry to have rendered", err)
+	}
+	if *attempts != 2 {
+		t.Errorf("the renderer was called %d times, want 2 — one cold, one retry", *attempts)
+	}
+	if !strings.Contains(recorder.Body.String(), ServerRenderedMarker) {
+		t.Errorf("the retry's document was not sent: %s", recorder.Body.String())
+	}
+	// A warmup is not a fallback. Counting it would have the health check and
+	// SSRFailures() report a problem that resolved itself.
+	if got := SSRFailures(); got != before {
+		t.Errorf("SSRFailures went from %d to %d; a successful retry must not count", before, got)
+	}
+}
+
+// TestARendererThatStaysBrokenStillFails, so the retry has not turned the
+// guard off.
+func TestARendererThatStaysBrokenStillFails(t *testing.T) {
+	SetStrictSSR(true)
+	t.Cleanup(func() { SetStrictSSR(true) })
+
+	before := SSRFailures()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/@ada", nil)
+
+	render, attempts := warmingRenderer(99)
+	err := guardedInertia(true).guardedRender(recorder, request, "Profiles/Show", render)
+
+	if !errors.Is(err, ErrSSRFellBack) {
+		t.Fatalf("err = %v, want ErrSSRFellBack", err)
+	}
+	if *attempts != 2 {
+		t.Errorf("the renderer was called %d times, want exactly 2 — one retry, not a loop", *attempts)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Errorf("something was written, so the caller cannot answer 500: %s", recorder.Body.String())
+	}
+	if got := SSRFailures(); got != before+1 {
+		t.Errorf("SSRFailures went from %d to %d, want one more", before, got)
+	}
+}
+
+// TestProductionDoesNotRetry, because the fallback is already going out and
+// making a real visitor wait for a second attempt is the wrong trade.
+func TestProductionDoesNotRetry(t *testing.T) {
+	SetStrictSSR(false)
+	t.Cleanup(func() { SetStrictSSR(true) })
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/@ada", nil)
+
+	render, attempts := warmingRenderer(1)
+	if err := guardedInertia(true).guardedRender(recorder, request, "Profiles/Show", render); err != nil {
+		t.Fatalf("err = %v, want the fallback to be served", err)
+	}
+	if *attempts != 1 {
+		t.Errorf("the renderer was called %d times in production, want 1", *attempts)
+	}
+	if strings.Contains(recorder.Body.String(), ServerRenderedMarker) {
+		t.Error("production served a retried render rather than the fallback")
+	}
+}
