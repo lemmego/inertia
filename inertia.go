@@ -60,13 +60,17 @@ type Config struct {
 	SSREnabled      bool
 	SSRURL          string
 	SSRHTTPClient   any // *http.Client
-	FlashProvider   FlashProvider
-	ContainerID     string
-	EncryptHistory  bool
-	JSONMarshaller  JSONMarshaller
-	Logger          Logger
-	ViteEnabled     bool
-	ViteCfg         *ViteConfig
+	// SSRTimeout bounds one server-side render. Zero means the per-renderer
+	// defaults, which is almost always what you want: see defaultSSRTimeout
+	// and viteSSRTimeout.
+	SSRTimeout     time.Duration
+	FlashProvider  FlashProvider
+	ContainerID    string
+	EncryptHistory bool
+	JSONMarshaller JSONMarshaller
+	Logger         Logger
+	ViteEnabled    bool
+	ViteCfg        *ViteConfig
 	// StrictSSR overrides what a failed render does. Nil means "strict
 	// outside production", which is the default and almost always right.
 	StrictSSR *bool
@@ -216,7 +220,26 @@ type withSSRHTTPClient struct{ client *http.Client }
 func (s withSSRHTTPClient) Apply(c *Config) { c.SSRHTTPClient = s.client }
 
 // WithSSRHTTPClient sets a custom HTTP client for SSR requests.
+//
+// The client's transport is wrapped, not replaced: a render still resolves the
+// renderer's address per request and still waits out a Vite warm-up. A client
+// carrying its own Timeout keeps it, and that Timeout then caps the
+// per-renderer budget — so leave it zero unless you mean to bound every
+// renderer the same way, in which case WithSSRTimeout says so more clearly.
 func WithSSRHTTPClient(client *http.Client) Option { return withSSRHTTPClient{client: client} }
+
+type withSSRTimeout struct{ d time.Duration }
+
+func (s withSSRTimeout) Apply(c *Config) { c.SSRTimeout = s.d }
+
+// WithSSRTimeout bounds one server-side render, whichever renderer answers it.
+//
+// The default is per renderer and is the better choice: three seconds for the
+// standalone server, which serves a prebuilt bundle, and a minute for the Vite
+// dev endpoint, which may still be transforming one. Naming a single number
+// overrides that distinction, so name one only when you have measured your
+// own.
+func WithSSRTimeout(d time.Duration) Option { return withSSRTimeout{d: d} }
 
 type withVite struct{ opts []ViteOption }
 
@@ -564,25 +587,39 @@ func NewInertiaWithError(a app.App, rootTemplatePath string, opts ...Option) (*I
 		gOpts = append(gOpts, gonertia.WithSSR(cfg.SSRURL))
 	}
 	if cfg.SSRHTTPClient != nil {
-		gOpts = append(gOpts, gonertia.WithSSRHTTPClient(cfg.SSRHTTPClient.(*http.Client)))
+		// A caller-supplied client is wrapped rather than used as given,
+		// because the transport is where two things the renderer cannot work
+		// without live: per-render address resolution and waiting out a Vite
+		// warm-up. Taking the client verbatim silently dropped both, which
+		// made "raise the SSR timeout" — the obvious thing to reach for —
+		// reintroduce the boot-time address bug described in ssr_resolve.go.
+		//
+		// The copy is so the caller's own client is not mutated; it may be
+		// shared with something else.
+		gOpts = append(gOpts, gonertia.WithSSRHTTPClient(
+			ssrClient(cfg.SSRHTTPClient.(*http.Client), cfg.SSRTimeout),
+		))
 	} else if cfg.SSRURL != "" {
 		// gonertia defaults to a bare &http.Client{}, which has no timeout.
 		// A dead SSR process fails fast and falls back; a *hung* one — a
 		// render stuck in a loop, a Node process paused by the OS — would
 		// hold the request, its goroutine and its connection indefinitely,
-		// and enough of those is the whole site. A render slower than this
-		// should degrade to client rendering, not queue.
-		// The transport re-resolves the renderer address per render rather
-		// than trusting the one detected at boot. See ssr_resolve.go: with a
-		// single boot-time lookup, a fresh project answered 500 on every page
-		// under `lemmego dev`, because air starts before vite has published
-		// ./public/hot and the address was then fixed for the process.
-		gOpts = append(gOpts, gonertia.WithSSRHTTPClient(
-			&http.Client{
-				Timeout:   defaultSSRTimeout,
-				Transport: newSSRTransport(nil),
-			},
-		))
+		// and enough of those is the whole site. A render slower than the
+		// budget should degrade to client rendering, not queue.
+		//
+		// The bound is the transport's rather than this client's, because the
+		// two renderers want budgets an order of magnitude apart and only the
+		// transport knows which one a given render is about to reach. A
+		// Timeout here would have to be the larger of the two and so could
+		// not bound the smaller.
+		//
+		// The transport also re-resolves the renderer address per render
+		// rather than trusting the one detected at boot. See ssr_resolve.go:
+		// with a single boot-time lookup, a fresh project answered 500 on
+		// every page under `lemmego dev`, because air starts before vite has
+		// published ./public/hot and the address was then fixed for the
+		// process.
+		gOpts = append(gOpts, gonertia.WithSSRHTTPClient(ssrClient(nil, cfg.SSRTimeout)))
 	}
 	if cfg.ContainerID != "" && cfg.ContainerID != "app" {
 		gOpts = append(gOpts, gonertia.WithContainerID(cfg.ContainerID))
@@ -1029,9 +1066,51 @@ func Vite(manifestPath, buildDir string) func(p string) (string, error) {
 	}
 }
 
-// defaultSSRTimeout bounds a server-side render request when the caller
-// supplied no HTTP client of its own. Use WithSSRHTTPClient to change it.
+// defaultSSRTimeout bounds a render against the standalone renderer, which
+// serves a bundle that was built before it started: it either renders
+// promptly or it is wedged, so a tight bound is the right one.
+//
+// Use WithSSRTimeout to change both budgets, or WithSSRHTTPClient to replace
+// the client outright.
 const defaultSSRTimeout = 3 * time.Second
+
+// viteSSRTimeout bounds a render against the Vite dev endpoint, which is a
+// different machine entirely: it transforms the SSR module graph on demand,
+// and on an application with a few dozen pages the first render after the dev
+// server starts can take the better part of a minute.
+//
+// Three seconds there is not a safety bound, it is a guarantee of failure —
+// and because strict SSR is on outside production, the failure is a 500 on
+// whichever page somebody happened to open first. Laravel's adapter gives its
+// renderer the HTTP client's default of thirty seconds and falls back rather
+// than erroring; this is the same posture, with the longer budget spent only
+// where a cold transform can actually be waiting at the other end.
+//
+// It costs nothing in production: there is no hot file there, so no render
+// ever resolves to this endpoint.
+const viteSSRTimeout = 60 * time.Second
+
+// ssrClient builds the HTTP client gonertia renders through.
+//
+// Always over the resolving transport, whether or not the caller brought a
+// client of its own, because that transport is where two things a render
+// cannot work without live: the renderer's address is re-read per request,
+// and a Vite warm-up is waited out rather than reported as a failed render.
+//
+// A supplied client is copied rather than mutated — it may be shared with
+// something else — and its own Timeout is kept, where it then caps the
+// per-renderer budget.
+func ssrClient(supplied *http.Client, budget time.Duration) *http.Client {
+	client := &http.Client{}
+	var base http.RoundTripper
+	if supplied != nil {
+		copied := *supplied
+		client = &copied
+		base = supplied.Transport
+	}
+	client.Transport = newSSRTransport(base).withBudget(budget)
+	return client
+}
 
 // slogLogger is the default gonertia logger: it routes gonertia's messages
 // into the application's structured log at WARN, because the only thing
