@@ -157,7 +157,7 @@ func TestOnlyTheViteEndpointIsRecognised(t *testing.T) {
 func TestASuppliedClientKeepsTheResolvingTransport(t *testing.T) {
 	supplied := &http.Client{Timeout: 42 * time.Second}
 
-	client := ssrClient(supplied, 0)
+	client := ssrClient(supplied, 0, false)
 
 	if _, ok := client.Transport.(*ssrRedirector); !ok {
 		t.Fatalf("transport = %T, want *ssrRedirector", client.Transport)
@@ -174,7 +174,7 @@ func TestASuppliedClientKeepsTheResolvingTransport(t *testing.T) {
 }
 
 func TestTheDefaultSSRClientHasNoClientLevelTimeout(t *testing.T) {
-	client := ssrClient(nil, 0)
+	client := ssrClient(nil, 0, false)
 
 	// A Timeout here would have to be the larger of the two budgets and so
 	// could not bound the smaller one; the transport owns the deadline.
@@ -183,5 +183,72 @@ func TestTheDefaultSSRClientHasNoClientLevelTimeout(t *testing.T) {
 	}
 	if _, ok := client.Transport.(*ssrRedirector); !ok {
 		t.Fatalf("transport = %T, want *ssrRedirector", client.Transport)
+	}
+}
+
+// A chosen renderer has to beat a discovered one, or naming the standalone
+// renderer while a Vite dev server is running is silently ignored — which is
+// what kept server rendering inside the reload loop.
+func TestAChosenRendererBeatsTheHotFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	var reached string
+	vite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = "vite"
+		_, _ = w.Write([]byte(`{"head":[],"body":"<div></div>"}`))
+	}))
+	defer vite.Close()
+	standalone := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = "standalone"
+		_, _ = w.Write([]byte(`{"head":[],"body":"<div></div>"}`))
+	}))
+	defer standalone.Close()
+
+	// Vite is up and advertising itself, exactly as under `lemmego dev`.
+	writeHotFile(t, vite.URL)
+
+	pinned := &http.Client{Transport: newSSRTransport(nil).pin()}
+	response, err := pinned.Post(standalone.URL+"/render", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if reached != "standalone" {
+		t.Errorf("the render reached %q, want the standalone renderer it was pointed at", reached)
+	}
+
+	// And the default still follows the hot file, which is what every
+	// project that has not chosen a renderer relies on.
+	reached = ""
+	following := &http.Client{Transport: newSSRTransport(nil)}
+	response, err = following.Post(standalone.URL+"/render", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if reached != "vite" {
+		t.Errorf("without pinning the render reached %q, want vite via the hot file", reached)
+	}
+}
+
+// An address in the environment must not switch rendering back on for
+// somebody who turned it off, which is why WithSSRURL exists beside
+// WithSSRAt.
+func TestNamingARendererDoesNotEnableRendering(t *testing.T) {
+	cfg := &Config{}
+	WithSSRURL("http://127.0.0.1:13714").Apply(cfg)
+
+	if cfg.SSRURL != "http://127.0.0.1:13714" {
+		t.Errorf("SSRURL = %q, want the address", cfg.SSRURL)
+	}
+	if cfg.SSREnabled {
+		t.Error("naming a renderer turned rendering on")
+	}
+
+	// WithSSRAt is the one that means both.
+	both := &Config{}
+	WithSSRAt("http://127.0.0.1:13714").Apply(both)
+	if !both.SSREnabled {
+		t.Error("WithSSRAt did not enable rendering")
 	}
 }

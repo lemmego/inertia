@@ -164,6 +164,22 @@ func (s withSSR) Apply(c *Config) { c.SSREnabled = true; c.SSRURL = s.url }
 // WithSSRAt enables server-side rendering at a custom URL.
 func WithSSRAt(url string) Option { return withSSR{url: url} }
 
+type withSSRURL struct{ url string }
+
+func (s withSSRURL) Apply(c *Config) { c.SSRURL = s.url }
+
+// WithSSRURL says *where* the renderer is without saying whether rendering is
+// on, which WithSSRAt conflates.
+//
+// The distinction earns its keep for the INERTIA_SSR_URL override: an address
+// in the environment must not be able to switch rendering back on for
+// somebody who turned it off with INERTIA_SSR=false.
+//
+// An address set this way is also *pinned*: it beats the Vite hot file rather
+// than losing to it, which is the whole point of being able to name the
+// standalone renderer while a Vite dev server is running. See EnvSSRURL.
+func WithSSRURL(url string) Option { return withSSRURL{url: url} }
+
 type withFlashProvider struct{ p FlashProvider }
 
 func (f withFlashProvider) Apply(c *Config) { c.FlashProvider = f.p }
@@ -289,6 +305,14 @@ func (p *Provider) Provide(a app.App) error {
 		WithFlashProvider(NewFlash()),
 	)
 	opts = append(opts, p.Options...)
+
+	// Before the on/off override, so INERTIA_SSR=false still wins over an
+	// address. Naming a renderer is not the same as asking for one.
+	if addr := ssrURLFromEnv(); addr != "" {
+		opts = append(opts, WithSSRURL(addr))
+		slog.Info("inertia: renders are pinned to the renderer named in the environment",
+			"INERTIA_SSR_URL", addr)
+	}
 
 	// Last, so the environment beats whatever LoadProviders said. Turning
 	// rendering off for an afternoon should not mean editing Go and
@@ -569,6 +593,14 @@ func NewInertiaWithError(a app.App, rootTemplatePath string, opts ...Option) (*I
 	// Translate Config → gonertia.Option
 	var gOpts []gonertia.Option
 
+	// Whether the address was *chosen* rather than discovered, captured
+	// before the fallback below fills it in. A chosen address is pinned: the
+	// transport stops consulting the hot file, so naming the standalone
+	// renderer works while a Vite dev server is running and advertising
+	// itself. Without this the hot file won every render and the choice was
+	// silently ignored.
+	pinnedSSRURL := cfg.SSRURL != ""
+
 	if cfg.SSREnabled && cfg.SSRURL == "" {
 		cfg.SSRURL = detectSSRURL()
 	}
@@ -597,7 +629,7 @@ func NewInertiaWithError(a app.App, rootTemplatePath string, opts ...Option) (*I
 		// The copy is so the caller's own client is not mutated; it may be
 		// shared with something else.
 		gOpts = append(gOpts, gonertia.WithSSRHTTPClient(
-			ssrClient(cfg.SSRHTTPClient.(*http.Client), cfg.SSRTimeout),
+			ssrClient(cfg.SSRHTTPClient.(*http.Client), cfg.SSRTimeout, pinnedSSRURL),
 		))
 	} else if cfg.SSRURL != "" {
 		// gonertia defaults to a bare &http.Client{}, which has no timeout.
@@ -619,7 +651,7 @@ func NewInertiaWithError(a app.App, rootTemplatePath string, opts ...Option) (*I
 		// every page under `lemmego dev`, because air starts before vite has
 		// published ./public/hot and the address was then fixed for the
 		// process.
-		gOpts = append(gOpts, gonertia.WithSSRHTTPClient(ssrClient(nil, cfg.SSRTimeout)))
+		gOpts = append(gOpts, gonertia.WithSSRHTTPClient(ssrClient(nil, cfg.SSRTimeout, pinnedSSRURL)))
 	}
 	if cfg.ContainerID != "" && cfg.ContainerID != "app" {
 		gOpts = append(gOpts, gonertia.WithContainerID(cfg.ContainerID))
@@ -1100,7 +1132,7 @@ const viteSSRTimeout = 60 * time.Second
 // A supplied client is copied rather than mutated — it may be shared with
 // something else — and its own Timeout is kept, where it then caps the
 // per-renderer budget.
-func ssrClient(supplied *http.Client, budget time.Duration) *http.Client {
+func ssrClient(supplied *http.Client, budget time.Duration, pinned bool) *http.Client {
 	client := &http.Client{}
 	var base http.RoundTripper
 	if supplied != nil {
@@ -1108,7 +1140,11 @@ func ssrClient(supplied *http.Client, budget time.Duration) *http.Client {
 		client = &copied
 		base = supplied.Transport
 	}
-	client.Transport = newSSRTransport(base).withBudget(budget)
+	transport := newSSRTransport(base).withBudget(budget)
+	if pinned {
+		transport = transport.pin()
+	}
+	client.Transport = transport
 	return client
 }
 

@@ -65,6 +65,10 @@ type ssrRedirector struct {
 	standalone time.Duration
 	vite       time.Duration
 
+	// pinned stops the hot file being consulted, because the caller named a
+	// renderer and a discovered one must not override a chosen one.
+	pinned bool
+
 	mu       sync.Mutex
 	resolved string
 	at       time.Time
@@ -83,6 +87,18 @@ func (s *ssrRedirector) withBudget(d time.Duration) *ssrRedirector {
 	if d > 0 {
 		s.standalone, s.vite = d, d
 	}
+	return s
+}
+
+// pin stops this transport retargeting, leaving every render to go wherever
+// gonertia was configured to send it.
+//
+// For the development setup that keeps rendering out of the reload loop: the
+// standalone renderer is named explicitly while a Vite dev server is also
+// running and publishing ./public/hot, and auto-detection would otherwise
+// take the render straight back to Vite. See EnvSSRURL.
+func (s *ssrRedirector) pin() *ssrRedirector {
+	s.pinned = true
 	return s
 }
 
@@ -278,6 +294,10 @@ func (c cancelOnClose) Close() error {
 // current returns the renderer address, re-reading the hot file at most once
 // per ssrResolveTTL.
 func (s *ssrRedirector) current() string {
+	if s.pinned {
+		return ""
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

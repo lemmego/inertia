@@ -26,6 +26,26 @@ import (
 // before you ship it.
 const EnvSSR = "INERTIA_SSR"
 
+// EnvSSRURL points renders at a particular renderer, overriding both what
+// LoadProviders configured and what the Vite hot file advertises.
+//
+// This is how a development setup keeps server rendering *out* of the reload
+// loop. Rendering through the Vite dev server means Vite transforms the SSR
+// module graph on demand, so the first render after it starts is slow enough
+// to look broken. The standalone renderer — `node bootstrap/ssr/ssr.js`,
+// built by `vite build --ssr` — serves a bundle that was finished before it
+// started, so it has no warm-up at all and nothing about rebuilding the Go
+// binary touches it.
+//
+// The cost is honest and worth stating: that bundle is only as current as the
+// last `vite build --ssr`, so a component change shows up in the browser over
+// HMR and *not* in the server-rendered document until it is rebuilt.
+//
+// Setting this does not turn rendering on. INERTIA_SSR still decides that, so
+// an address here and INERTIA_SSR=false together mean "off, and when it is on
+// it is that renderer".
+const EnvSSRURL = "INERTIA_SSR_URL"
+
 const ServerRenderedMarker = `data-server-rendered="true"`
 
 // ErrSSRFellBack is returned by a document render that produced no
@@ -204,6 +224,14 @@ func ssrStrictFromEnv(env string) bool {
 // from an absent one, and a typo would take the process down before anything
 // could log why. Absent and empty both mean "whatever the application
 // configured"; an unreadable value means the same, plus a complaint.
+// ssrURLFromEnv reads INERTIA_SSR_URL.
+//
+// Read directly rather than through config.MustEnv, for the reason below: a
+// stray `INERTIA_SSR_URL=` line must mean the same as an absent one.
+func ssrURLFromEnv() string {
+	return strings.TrimSpace(os.Getenv(EnvSSRURL))
+}
+
 func ssrFromEnv() (enabled bool, set bool) {
 	raw := strings.TrimSpace(os.Getenv(EnvSSR))
 	if raw == "" {
