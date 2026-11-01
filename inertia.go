@@ -1016,6 +1016,18 @@ func GetTemplateData(ctx context.Context) map[string]any {
 // Renderer implementation
 // ---------------------------------------------------------------------------
 
+// ViewName satisfies app.ViewNamer, so a render observer reports the
+// component that was rendered rather than "*inertia.InertiaResponse" on
+// every page — which is a count, not a view panel.
+//
+// It deliberately does not say whether the render came back server-rendered.
+// The SSR guard already owns that question, counts its failures and logs
+// them (see ssr_guard.go), and a second source of truth for it is exactly
+// the drift this repository keeps paying for.
+func (ir *InertiaResponse) ViewName() string { return ir.filePath }
+
+var _ app.ViewNamer = (*InertiaResponse)(nil)
+
 // Render satisfies the Renderer interface expected by app.Context.Render().
 func (ir *InertiaResponse) Render(w io.Writer) error {
 	if ir.ctx.Status() == 0 {
