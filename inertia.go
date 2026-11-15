@@ -1063,8 +1063,49 @@ func (i *Inertia) ShareProp(key string, val any) {
 
 // Middleware returns an HTTP middleware that handles Inertia request detection,
 // version checks, flash data resolution, and response wrapping.
+//
+// A request a browser made for a sub-resource skips all of it. That is not an
+// optimisation: flash data is one-shot, the middleware below reads and clears
+// it on every request it wraps, and Provider.Provide installs this on the
+// whole router rather than per route. So a favicon or a stylesheet fetched
+// between a redirect and the page it redirected to consumes the message that
+// page was going to show — and the symptom is a flash that vanishes now and
+// then, with nothing in any log, which is close to undiagnosable.
 func (i *Inertia) Middleware(next http.Handler) http.Handler {
-	return i.inner.Middleware(next)
+	inner := i.inner.Middleware(next)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isSubresourceRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+// isSubresourceRequest reports whether a browser asked for something that
+// cannot be answered with an Inertia page.
+//
+// Sec-Fetch-Dest is the signal, and it is a good one: every current browser
+// labels its own fetches, sends the header on plain HTTP as well as HTTPS, and
+// cannot be talked out of it by the page. "document" is a navigation and
+// "empty" is the fetch() an Inertia visit makes; "image", "style", "script",
+// "font" and the rest are sub-resources.
+//
+// A client that sends no such header — curl, a Go test, a crawler, an old
+// browser — is treated as a page request. That is the safe way round: it
+// keeps every non-browser client working exactly as before, and the worst it
+// can do is read a flash early.
+func isSubresourceRequest(r *http.Request) bool {
+	if IsInertiaRequest(r) {
+		return false
+	}
+	switch r.Header.Get("Sec-Fetch-Dest") {
+	case "", "document", "empty", "iframe", "frame", "object", "embed":
+		return false
+	default:
+		return true
+	}
 }
 
 // ---------------------------------------------------------------------------
