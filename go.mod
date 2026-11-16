@@ -3,7 +3,7 @@ module github.com/lemmego/inertia
 go 1.27
 
 require (
-	github.com/lemmego/api v0.12.1
+	github.com/lemmego/api v0.13.0
 	github.com/romsar/gonertia/v3 v3.0.0
 )
 
